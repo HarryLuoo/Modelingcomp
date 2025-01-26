@@ -15,12 +15,38 @@ import torchvision.transforms as transforms
 PRESSURE = 1.1
 RAIN = 0.9
 
+def poisson_binary(rate, time_steps, dt):
+    """
+    Simulates a Poisson process returning 1 (event) or 0 (no event) at each time step.
+    
+    Parameters:
+        rate (float): Average rate (events per unit time).
+        time_steps (int): Number of time steps to simulate.
+        dt (float): Time step size (small interval).
+        
+    Returns:
+        numpy.ndarray: Array of 1s and 0s representing events over time.
+    """
+    # Probability of an event in each time step
+    p_event = rate * dt
+    
+    # Generate binary outcomes (1 for event, 0 for no event)
+    return np.random.choice([1, 0], size=time_steps, p=[p_event, 1 - p_event])
+
+
+
+
+
 class StairCaseSimulator():
     # k = number of stairs, w = stair width in meters, l =stair length in meters, n = number of walkers daily,
     # r = centimeters of rain yearly, h = stair height in meters, sWidth = mean walker shoulder width, gDelt = gate standard deviatior,
-    # shoe = tuple for dimensions of the shoe, pRInit = probability distribution for intial right step
-    # PLIit = probability distribution for initial left step
-    def __init__(self, k, w, l, n, h, sWidth, gDelt, shoe, pRInit, pLInit, d = 0.01, r = 0):
+    # shoe = tuple for dimensions of the shoe
+    # p_n = narrow walker chance
+    #muS is a 2x2 matrix containing in the 0 row the x, y positions for the left foot of the Standard walker and in the 1 row the x,y for the right foot
+    #muN is a 2x2 -----------------------------------------------------------------------------Narrow--------------------------------------
+    #sigS is a 2x2 covariance matrix containg in 0,0 the variance of the x coordinate of the Standard walker and in 1,1 the variance of the y coordinate. The other two positions contain zeros reflecting an assumption that the x and y positions of a given step are not correlated.
+    #sigN is a 2x2 ---------------------------------------------------------------------------Narrow-----------------------------------
+    def __init__(self, k, w, l, n, h, sWidth, gDelt, shoe, muS, muN, sigS, sigN, p_u, d = 0.01, r = 0):
         self.k = k
         self.w = w
         self.l = l
@@ -31,13 +57,17 @@ class StairCaseSimulator():
         self.sWidth = sWidth
         self.gDelt = gDelt
         self.shoe = shoe
-        self.pRInit = pRInit
-        self.pLInit = pLInit
         self.M = int(w/d)
         self.N = int(l/d)
         self.stairs = np.zeros((k, self.M, self.N))
         self.stairsFlow = np.zeros((self.k, self.M, self.N))
         self.flowDirection = np.zeros((self.k, self.M, self.N))
+        self.flowYDistance = np.zeros((self.k, self.M, self.N))
+        self.p_u = p_u
+        self.muS=muS
+        self.muN=muN
+        self.sigS=sigS
+        self.sigN=sigN
 
 
     def simulateWalker(self):
@@ -47,25 +77,36 @@ class StairCaseSimulator():
         sigma_y =0
         parity = random.randint(0, 1)
         place = np.zeros(2)
+        r = random.random()
+        if r < self.p_u:
+            mean = self.muN
+            sig = self.sigN
+            stepWidth = self.sWidth/2
+            stepSig = self.gDelt/2
+        else:
+            mean = self.muS
+            sig = self.sigS
+            stepWidth = self.sWidth
+            stepSig = self.gDelt
         while True:
             if parity is LEFT:
-                place[0] = random.gauss(self.pLInit[0], self.pLInit[1])
-                place[1] = random.gauss(self.pLInit[2], self.pLInit[3])
+                place[0] = random.gauss(mean[0][0], np.sqrt(sig[0][0]))
+                place[1] = random.gauss(mean[0][1], np.sqrt(sig[0][1]))
             
             else:
-                place[0] = random.gauss(self.pRInit[0], self.pRInit[1])
-                place[1] = random.gauss(self.pRInit[2], self.pRInit[3])
+                place[0] = random.gauss(mean[1][0], np.sqrt(sig[1][0]))
+                place[1] = random.gauss(mean[1][1], np.sqrt(sig[1][1]))
             if 0 <= place[0] <= self.w and 0 <= place[1] <= self.l:
                 break
         for i in range(self.k):
             while True:
                 if parity is LEFT:
-                    place[0] = random.gauss(place[0] + self.sWidth, sigma_x)
-                    place[1] = random.gauss(place[1], sigma_y)
+                    place[0] = random.gauss(place[0] + stepWidth, stepSig)
+                    place[1] = random.gauss(place[1], stepSig)
             
                 else:
-                    place[0] = random.gauss(place[0] - self.sWidth, sigma_x)
-                    place[1] = random.gauss(place[1], sigma_y)
+                    place[0] = random.gauss(place[0] - stepWidth, stepSig)
+                    place[1] = random.gauss(place[1], stepSig)
                 if 0 <= place[0] <= self.w and 0 <= place[1] <= self.l:
                     break
 
@@ -77,6 +118,7 @@ class StairCaseSimulator():
                 for k in range(yLow, yHigh):
                     self.stairs[i, j, k] += PRESSURE #we assume this contains how many centimeters of erosion a footstep will give
             parity != parity
+
     def flowTraverse(self, n, x, y, minimum):
         neighbors = []
         norm = (
@@ -92,13 +134,13 @@ class StairCaseSimulator():
 
         if y > 0:
             neighbors.append((self.stairs[n, x, y-1], max(self.stairs[n, x, y-1] - minimum, 0) / norm, x, y-1))
-        if x > 0:
+        elif x > 0:
             neighbors.append((self.stairs[n, x-1, y], max(self.stairs[n, x-1, y] - minimum, 0) / norm, x-1, y))
-        if y < self.N - 1:
+        elif y < self.N - 1:
             neighbors.append((self.stairs[n, x, y+1], max(self.stairs[n, x, y+1] - minimum, 0) / norm, x, y+1))
-        if x < self.M - 1:
+        elif x < self.M - 1:
             neighbors.append((self.stairs[n, x+1, y], max(self.stairs[n, x+1, y] - minimum, 0) / norm, x+1, y))
-        else: #water falls down to next stair
+        elif y == self.N -1: #water falls down to next stair
             self.flowDirection[n][x][y] = 2
             return None
         rand = random.random()
@@ -118,23 +160,43 @@ class StairCaseSimulator():
                 for j in range(self.M):
                     height = int(self.h - self.stairs[i-1][j][self.N-1])
                     self.stairsFlow[i][j][height] += self.stairsFlow[i-1][j][self.N-1]
+                    self.flowYDistance[i][j][height] += self.h - self.stairs[i-1][j][self.N-1] + self.flowYDistance[i-1][j][self.N-1]
             currIndic = np.where(indices[0] == self.k)
             for idx in zip(*currIndic):
                 curr = self.flowTraverse(idx[0], idx[1], idx[2], minimum + threshold)
                 self.stairsFlow[i][curr[2]][curr[3]] += self.stairsFlow[i][idx[1]][idx[2]]
+                self.flowYDistance[i][curr[2]][curr[3]] += self.flowYDistance[i][idx[1]][idx[2]] + self.stairs[i][curr[2]][curr[3]] - self.stairs[i][idx[1]][idx[2]]
                 while True:
                     temp = self.flowTraverse(i, curr[2], curr[3], minimum + threshold)
                     if temp is None:
                         break
                     self.stairsFlow[i][temp[2]][temp[3]] += self.stairsFlow[i][curr[3]][curr[3]]
+                    self.flowYDistance[i][temp[2]][temp[3]] += self.flowYDistance[i][curr[2]][curr[3]] + self.stairs[i][temp[2]][temp[3]] - self.stairs[i][curr[2]][curr[3]]
+
 
 
     def calculateRainErosion(self):
-        # this method assumes the stairsFlow matrix is populated with a value representing the 
+        # this method assumes the stairsFlow matrix and flowYDistance is populated with a value representing the 
         # number of centimeters rain flowing. We need to determine how many centimers of erosion this would cause. 
         # once determined this value should be added to that in the stairs matrix.
         return None
             
+    def runSimulation(self, timeMax, timeStep, rainFreq, walkFreq, threshhold):
+        #timeMax is maximum time in years since the archeologists believe the stairs were built
+        #timeStep will need to be decided later but it is the framing for rainFreq and walkFreq
+        # I am thinking a time step of months or years.
+        n = timeMax / timeStep
+        rainEvents = poisson_binary(rainFreq, n, timeStep)
+        walkerEvents = poisson_binary(walkFreq, n, timeStep)
+        t = np.linspace(0, timeMax, n)
+        stairs = np.zeros((n,self.k, self.M, self.N))
+        for i, _ in enumerate(t):
+            if walkerEvents[i] == 1:
+                self.simulateWalker()
+            elif rainEvents[i] == 1:
+                self.simulateRain(threshhold)
+            stairs[i] = self.stairs
+        return stairs, t
 
 class Model(nn.Module):
     def __init__(self):
